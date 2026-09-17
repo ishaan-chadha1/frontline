@@ -17,7 +17,7 @@ MATTRESS = REPO / "taxonomy" / "mattress.yaml"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = connect(tmp_path / "test.db")
+    c = connect(path=tmp_path / "test.db")
     init_schema(c)
     yield c
     c.close()

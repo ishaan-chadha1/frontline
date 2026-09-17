@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -27,7 +26,7 @@ from .resolve import record_unresolved, resolve
 UTC_NOW = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
 
 
-def ancestors(conn: sqlite3.Connection, unit_id: int) -> tuple[int, int | None, int | None]:
+def ancestors(conn, unit_id: int) -> tuple[int, int | None, int | None]:
     """Flatten the org chain onto the event row so 'group by state' stays a
     join-free integer GROUP BY at any level of the hierarchy."""
     chain: list[int] = []
@@ -42,7 +41,7 @@ def ancestors(conn: sqlite3.Connection, unit_id: int) -> tuple[int, int | None, 
 
 
 def ingest_text(
-    conn: sqlite3.Connection,
+    conn,
     *,
     person_id: int,
     text: str,
@@ -64,7 +63,7 @@ def ingest_text(
         raise ValueError(f"unknown person_id {person_id}")
 
     now = UTC_NOW()
-    cur = conn.execute(
+    capture_id = conn.insert(
         "INSERT INTO raw_capture (external_id, person_id, unit_id, audio_sha256, "
         "audio_uri, captured_at, captured_on, received_at, status) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -80,7 +79,6 @@ def ingest_text(
             "transcribed",
         ),
     )
-    capture_id = int(cur.lastrowid)
     conn.execute(
         "INSERT INTO transcript (capture_id, engine, engine_version, text, created_at) "
         "VALUES (?,?,?,?,?)",
@@ -90,7 +88,7 @@ def ingest_text(
     return capture_id
 
 
-def extract_capture(conn: sqlite3.Connection, capture_id: int, provider: str | None = None) -> int:
+def extract_capture(conn, capture_id: int, provider: str | None = None) -> int:
     """Run extraction and write the events. Returns the new run id."""
     tax = tax_mod.load()
     transcript = conn.execute(
@@ -114,7 +112,7 @@ def extract_capture(conn: sqlite3.Connection, capture_id: int, provider: str | N
         (transcript["id"],),
     ).fetchall()
 
-    cur = conn.execute(
+    run_id = conn.insert(
         "INSERT INTO extraction_run (transcript_id, model, prompt_version, "
         "taxonomy_version, input_tokens, output_tokens, latency_ms, created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
@@ -129,7 +127,6 @@ def extract_capture(conn: sqlite3.Connection, capture_id: int, provider: str | N
             UTC_NOW(),
         ),
     )
-    run_id = int(cur.lastrowid)
 
     for old in prior:
         conn.execute(
@@ -160,7 +157,7 @@ def extract_capture(conn: sqlite3.Connection, capture_id: int, provider: str | N
         start = transcript["text"].find(ev.span) if ev.span else -1
         end = start + len(ev.span) if start >= 0 else None
 
-        cur = conn.execute(
+        event_id = conn.insert(
             "INSERT INTO event (run_id, capture_id, person_id, unit_id, unit_l1, "
             "unit_l2, unit_l3, occurred_on, taxonomy_node_id, subject_id, rival_id, "
             "actor_id, polarity, intensity, span_start, span_end, confidence) "
@@ -174,7 +171,7 @@ def extract_capture(conn: sqlite3.Connection, capture_id: int, provider: str | N
             ),
         )
         for slot_name, surface in unmatched:
-            record_unresolved(conn, int(cur.lastrowid), slot_name, surface)
+            record_unresolved(conn, event_id, slot_name, surface)
 
     conn.execute("UPDATE raw_capture SET status = 'extracted' WHERE id = ?", (capture_id,))
     conn.commit()

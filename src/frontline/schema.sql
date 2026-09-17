@@ -78,6 +78,19 @@ CREATE INDEX IF NOT EXISTS ix_taxonomy_dim ON taxonomy_node(vertical, dimension)
 
 -- ------------------------------------------------------- the provenance chain
 
+-- Declared before raw_capture: Postgres enforces reference order, and these two
+-- point at each other. capture_prompt.capture_id is deliberately left without a
+-- foreign key to break the cycle -- it is the one place we trade a constraint
+-- for portability.
+CREATE TABLE IF NOT EXISTS capture_prompt (
+  id           INTEGER PRIMARY KEY,
+  person_id    INTEGER NOT NULL REFERENCES person(id),
+  sent_at      TEXT    NOT NULL,
+  prompt_type  TEXT    NOT NULL,   -- scheduled | manual | eod_gap | closing_count
+  responded    INTEGER NOT NULL DEFAULT 0,
+  capture_id   INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS raw_capture (
   id             INTEGER PRIMARY KEY,
   external_id    TEXT    NOT NULL UNIQUE, -- WhatsApp message id; idempotency key
@@ -180,14 +193,6 @@ CREATE INDEX IF NOT EXISTS ix_unresolved ON unresolved_mention(reviewed, occurre
 
 -- --------------------------------------------------------- capture and consent
 
-CREATE TABLE IF NOT EXISTS capture_prompt (
-  id           INTEGER PRIMARY KEY,
-  person_id    INTEGER NOT NULL REFERENCES person(id),
-  sent_at      TEXT    NOT NULL,
-  prompt_type  TEXT    NOT NULL,   -- scheduled | manual | eod_gap | closing_count
-  responded    INTEGER NOT NULL DEFAULT 0,
-  capture_id   INTEGER REFERENCES raw_capture(id)
-);
 
 CREATE TABLE IF NOT EXISTS confirmation (
   id               INTEGER PRIMARY KEY,

@@ -8,7 +8,6 @@ that "AT" really did mean Ather in that note.
 """
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 
 from .taxonomy import normalise
@@ -21,7 +20,7 @@ class Resolution:
     matched: bool
 
 
-def resolve(conn: sqlite3.Connection, entity_type: str, surface: str | None) -> Resolution:
+def resolve(conn, entity_type: str, surface: str | None) -> Resolution:
     if not surface or not surface.strip():
         return Resolution(None, surface or "", False)
     row = conn.execute(
@@ -34,7 +33,7 @@ def resolve(conn: sqlite3.Connection, entity_type: str, surface: str | None) -> 
     return Resolution(None, surface, False)
 
 
-def record_unresolved(conn: sqlite3.Connection, event_id: int, slot: str, surface: str) -> None:
+def record_unresolved(conn, event_id: int, slot: str, surface: str) -> None:
     """Queue for weekly review. Sorted by frequency, this is how the alias table
     grows -- and a new competitor entering the market shows up here first."""
     row = conn.execute(

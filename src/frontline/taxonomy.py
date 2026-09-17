@@ -11,7 +11,6 @@ they silently fragment the aggregate, and nothing errors.
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import unicodedata
 from dataclasses import dataclass, field
@@ -102,7 +101,7 @@ def normalise(text: str) -> str:
     return " ".join(stripped.lower().split())
 
 
-def sync_to_db(conn: sqlite3.Connection, tax: Taxonomy) -> dict[str, int]:
+def sync_to_db(conn, tax: Taxonomy) -> dict[str, int]:
     """Upsert nodes and seed entities.
 
     Integer ids are permanent and never reused. A node that disappears from the
@@ -126,12 +125,11 @@ def sync_to_db(conn: sqlite3.Connection, tax: Taxonomy) -> dict[str, int]:
                 (label, parent_id, depth, order, node_id),
             )
         else:
-            cur = conn.execute(
+            node_id = conn.insert(
                 "INSERT INTO taxonomy_node (vertical, path, dimension, label, "
                 "parent_id, depth, sort_order, added_in) VALUES (?,?,?,?,?,?,?,?)",
                 (tax.vertical, path, dimension, label, parent_id, depth, order, tax.version),
             )
-            node_id = int(cur.lastrowid)
         ids[path] = node_id
 
     live = set(ids)
@@ -152,26 +150,24 @@ def sync_to_db(conn: sqlite3.Connection, tax: Taxonomy) -> dict[str, int]:
                 (entity_type, item["name"]),
             ).fetchone()
             entity_id = (
-                row["id"]
+                int(row["id"])
                 if row
-                else int(
-                    conn.execute(
-                        "INSERT INTO entity (entity_type, name) VALUES (?,?)",
-                        (entity_type, item["name"]),
-                    ).lastrowid
+                else conn.insert(
+                    "INSERT INTO entity (entity_type, name) VALUES (?,?)",
+                    (entity_type, item["name"]),
                 )
             )
             aliases = set(item.get("aliases", [])) | {item["name"]}
             for alias in aliases:
                 conn.execute(
-                    "INSERT OR IGNORE INTO entity_alias (entity_id, alias_norm, "
-                    "source, created_at) VALUES (?,?,?,?)",
+                    "INSERT INTO entity_alias (entity_id, alias_norm, source, created_at) "
+                    "VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
                     (entity_id, normalise(alias), "seed", now),
                 )
 
     conn.execute(
         "INSERT INTO schema_meta (key, value) VALUES (?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         (f"taxonomy_version:{tax.vertical}", tax.version),
     )
     conn.commit()

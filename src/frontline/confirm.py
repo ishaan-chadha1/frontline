@@ -9,7 +9,6 @@ never objection.PRICE.EMI.
 """
 from __future__ import annotations
 
-import sqlite3
 
 DIMENSION_LABEL = {
     "objection": "objection",
@@ -18,7 +17,7 @@ DIMENSION_LABEL = {
 }
 
 
-def render_card(conn: sqlite3.Connection, capture_id: int) -> str:
+def render_card(conn, capture_id: int) -> str:
     rows = conn.execute(
         """SELECT t.label, t.dimension, t.path,
                   se.name AS subject, re.name AS rival, e.confidence

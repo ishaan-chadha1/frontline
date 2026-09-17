@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 
 from . import taxonomy as tax_mod
 from .confirm import render_card
@@ -40,11 +40,9 @@ def seed(conn) -> int:
         return int(conn.execute("SELECT id FROM person LIMIT 1").fetchone()["id"])
 
     def unit(name, level, parent, depth):
-        return int(
-            conn.execute(
-                "INSERT INTO org_unit (name, level, parent_id, depth) VALUES (?,?,?,?)",
-                (name, level, parent, depth),
-            ).lastrowid
+        return conn.insert(
+            "INSERT INTO org_unit (name, level, parent_id, depth) VALUES (?,?,?,?)",
+            (name, level, parent, depth),
         )
 
     india = unit("India", "country", None, 0)
@@ -52,23 +50,19 @@ def seed(conn) -> int:
     store = unit("Lucknow Hazratganj", "store", up, 2)
 
     for name in ("Model X", "Model Y"):
-        eid = int(
-            conn.execute(
-                "INSERT INTO entity (entity_type, name) VALUES ('product', ?)", (name,)
-            ).lastrowid
+        eid = conn.insert(
+            "INSERT INTO entity (entity_type, name) VALUES ('product', ?)", (name,)
         )
         conn.execute(
-            "INSERT OR IGNORE INTO entity_alias (entity_id, alias_norm, source, created_at) "
-            "VALUES (?,?,'seed',datetime('now'))",
-            (eid, tax_mod.normalise(name)),
+            "INSERT INTO entity_alias (entity_id, alias_norm, source, created_at) "
+            "VALUES (?,?,'seed',?) ON CONFLICT DO NOTHING",
+            (eid, tax_mod.normalise(name), datetime.now(timezone.utc).isoformat()),
         )
 
-    person_id = int(
-        conn.execute(
-            "INSERT INTO person (name, phone_e164, unit_id, role, language_pref) "
-            "VALUES ('Rahul Verma','+919999000001',?,'sales_exec','hi')",
-            (store,),
-        ).lastrowid
+    person_id = conn.insert(
+        "INSERT INTO person (name, phone_e164, unit_id, role, language_pref) "
+        "VALUES ('Rahul Verma','+919999000001',?,'sales_exec','hi')",
+        (store,),
     )
     conn.commit()
     return person_id
