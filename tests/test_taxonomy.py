@@ -104,3 +104,17 @@ def test_unknown_mention_does_not_resolve(conn):
         "SELECT 1 FROM entity_alias WHERE alias_norm = ?", (normalise("Sleepwell"),)
     ).fetchone()
     assert row is None, "an unknown name must queue for review, not silently bind"
+
+
+def test_gemini_schema_dialect_conversion():
+    """Gemini takes a subset of JSON Schema. Keeping the canonical schema
+    provider-neutral and translating at the edge is what lets a second provider
+    land without touching the taxonomy layer."""
+    from frontline.extract import to_gemini_schema
+
+    g = to_gemini_schema(extraction_schema(load(EV)))
+    item = g["properties"]["events"]["items"]
+    assert item["type"] == "OBJECT"
+    assert item["properties"]["node"]["enum"], "the node enum must survive translation"
+    assert item["properties"]["subject"]["nullable"] is True
+    assert "additionalProperties" not in item, "Gemini rejects it"

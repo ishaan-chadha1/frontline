@@ -46,7 +46,7 @@ def load_settings() -> Settings:
         gcs_audio_bucket=os.getenv("GCS_AUDIO_BUCKET"),
         gcp_region=os.getenv("GCP_REGION", "asia-south1"),
         llm_provider=os.getenv("FRONTLINE_LLM", "gemini"),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
         asr_provider=os.getenv("FRONTLINE_ASR", "stub"),
     )
 
