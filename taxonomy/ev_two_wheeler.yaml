@@ -1,0 +1,80 @@
+# EV two-wheeler retail. A vertical is this file -- never an ALTER TABLE.
+vertical: ev_two_wheeler
+version: 1.0.0
+language_hints: [hi, en, hi-en]
+
+# What the fact table's generic slots mean in this industry.
+slots:
+  subject: { entity_type: product,    label: Model }
+  rival:   { entity_type: competitor, label: Competitor }
+  actor:   { entity_type: lead,       label: Customer }
+
+# What the org hierarchy's levels are called here.
+org_levels: [country, state, cluster, store]
+
+dimensions:
+  objection:
+    description: A reason the customer hesitated or declined
+    nodes:
+      PRICE:
+        label: Price
+        children:
+          upfront_price:  { label: Upfront price too high }
+          EMI:            { label: EMI amount or tenure }
+          down_payment:   { label: Down payment too high }
+          finance_rate:   { label: Interest rate or finance terms }
+          exchange_value: { label: Exchange value for old vehicle }
+      BATTERY:
+        label: Battery
+        children:
+          range:            { label: Real-world range }
+          charging:         { label: Charging time or infrastructure }
+          warranty:         { label: Battery warranty terms }
+          safety:           { label: Fire or safety concern }
+          replacement_cost: { label: Battery replacement cost }
+      SERVICE:
+        label: Service
+        children:
+          network:      { label: Service network reach }
+          turnaround:   { label: Service turnaround time }
+          spare_parts:  { label: Spare parts availability }
+      DELIVERY:
+        label: Delivery
+        children:
+          wait_time:    { label: Delivery wait time }
+          colour_stock: { label: Colour or variant unavailable }
+
+  brand_attribute:
+    description: A brand quality the customer raised, about us or a rival
+    nodes:
+      trust:        { label: Brand trust }
+      design:       { label: Design and looks }
+      quality:      { label: Build quality }
+      service:      { label: Service reputation }
+      availability: { label: Stock availability }
+      resale:       { label: Resale value }
+
+  outcome:
+    description: Where the interaction ended up
+    nodes:
+      booked: { label: Booking taken }
+      hot:    { label: Likely to return }
+      warm:   { label: Undecided }
+      lost:   { label: Went to a competitor }
+
+seed_entities:
+  competitor:
+    - name: Ola
+      aliases: [ola, ola electric, ola s1, olaa]
+    - name: Ather
+      aliases: [ather, athar, ather energy, ather 450, at]
+    - name: TVS
+      aliases: [tvs, tvs iqube, iqube]
+    - name: Bajaj
+      aliases: [bajaj, chetak, bajaj chetak]
+    - name: Hero
+      aliases: [hero, hero vida, vida]
+    - name: Okinawa
+      aliases: [okinawa, okinava]
+    - name: Ampere
+      aliases: [ampere, ampere magnus]

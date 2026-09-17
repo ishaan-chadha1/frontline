@@ -1,0 +1,58 @@
+# A second vertical. Proof that an industry is a file, not a code change.
+vertical: mattress
+version: 1.0.0
+language_hints: [hi, en, hi-en]
+
+slots:
+  subject: { entity_type: product,    label: Mattress }
+  rival:   { entity_type: competitor, label: Competitor }
+  actor:   { entity_type: lead,       label: Customer }
+
+org_levels: [country, state, city, store]
+
+dimensions:
+  objection:
+    description: A reason the customer hesitated or declined
+    nodes:
+      PRICE:
+        label: Price
+        children:
+          upfront_price: { label: Price too high }
+          EMI:           { label: EMI amount or tenure }
+          discount:      { label: Wants a bigger discount }
+      COMFORT:
+        label: Comfort
+        children:
+          firmness: { label: Too firm or too soft }
+          heat:     { label: Sleeps hot }
+          motion:   { label: Partner disturbance }
+      LOGISTICS:
+        label: Logistics
+        children:
+          delivery_time: { label: Delivery wait }
+          trial_policy:  { label: Trial or return policy }
+          old_mattress:  { label: Old mattress disposal }
+
+  brand_attribute:
+    description: A brand quality the customer raised
+    nodes:
+      trust:    { label: Brand trust }
+      warranty: { label: Warranty terms }
+      durability: { label: Durability }
+
+  outcome:
+    description: Where the interaction ended up
+    nodes:
+      booked: { label: Order placed }
+      hot:    { label: Likely to return }
+      warm:   { label: Undecided }
+      lost:   { label: Went to a competitor }
+
+seed_entities:
+  competitor:
+    - name: Sleepwell
+      aliases: [sleepwell, sleep well]
+    - name: Duroflex
+      aliases: [duroflex, duro flex]
+    - name: Kurlon
+      aliases: [kurlon, kurl on]
