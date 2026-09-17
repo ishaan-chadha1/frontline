@@ -53,12 +53,22 @@ def test_generated_schema_constrains_the_node_field():
 
 
 def test_schema_exposes_generic_slots_not_industry_names():
-    props = extraction_schema(load(EV))["properties"]["events"]["items"]["properties"]
-    for slot in ("subject", "rival", "actor"):
+    tax = load(EV)
+    props = extraction_schema(tax)["properties"]["events"]["items"]["properties"]
+    # Whichever slots the vertical declares, they appear under their generic
+    # names -- never the industry word behind them.
+    assert tax.slots, "a vertical must declare at least one slot"
+    for slot in tax.slots:
         assert slot in props
-    # The fact table must never learn what industry it is in.
-    assert "product" not in props
-    assert "competitor" not in props
+    for industry_word in ("product", "competitor", "lead", "molecule"):
+        assert industry_word not in props
+
+
+def test_cross_shopping_is_a_first_class_fact():
+    """A rival can be mentioned with no objection attached. If the only home for
+    a competitor is a slot on some other event, that mention is lost."""
+    leaves = set(load(EV).leaf_paths())
+    assert "competitive.cross_shopping" in leaves
 
 
 def test_a_second_vertical_needs_no_code_change():

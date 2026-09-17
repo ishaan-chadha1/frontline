@@ -21,6 +21,7 @@ from .confirm import render_card
 from .db import connect, init_schema
 from .demo import seed
 from .pipeline import extract_capture, ingest_text
+from .resolve import prune_unresolved
 
 ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 
@@ -47,7 +48,9 @@ def require_code(request: Request) -> None:
 def startup() -> None:
     conn = connect()
     init_schema(conn)
-    tax_mod.sync_to_db(conn, tax_mod.load())
+    tax = tax_mod.load()
+    tax_mod.sync_to_db(conn, tax)
+    prune_unresolved(conn, tax)
     seed(conn)
     conn.close()
 
@@ -126,7 +129,7 @@ def aggregate(request: Request, conn=Depends(db)):
         """SELECT t.id, t.label, t.path, COUNT(*) AS n,
                   COUNT(DISTINCT e.person_id) AS people
            FROM event e JOIN taxonomy_node t ON t.id = e.taxonomy_node_id
-           WHERE e.is_active = 1 AND t.dimension = 'objection'
+           WHERE e.is_active = 1 AND t.dimension IN ('objection', 'competitive')
            GROUP BY t.id, t.label, t.path ORDER BY n DESC LIMIT 8""",
     ).fetchall()
     return {
@@ -176,6 +179,23 @@ def evidence(path: str, request: Request, conn=Depends(db)):
     }
 
 
+@app.get("/api/discoveries")
+def discoveries(request: Request, conn=Depends(db)):
+    """Names the reps used that resolve to nothing we know.
+
+    Sorted by frequency this is the weekly review queue -- and a brand entering
+    the market shows up here before it shows up anywhere else."""
+    require_code(request)
+    rows = conn.execute(
+        "SELECT slot, surface_form, occurrences FROM unresolved_mention "
+        "WHERE reviewed = 0 ORDER BY occurrences DESC LIMIT 10"
+    ).fetchall()
+    return {"discoveries": [
+        {"slot": r["slot"], "name": r["surface_form"], "seen": r["occurrences"]}
+        for r in rows
+    ]}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return INDEX_HTML
@@ -186,16 +206,18 @@ INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Frontline</title>
 <style>
-:root{--bg:#faf9f7;--fg:#1a1a18;--mut:#6b6b66;--line:#e0ded8;--card:#fff;--ac:#0f6e56}
+:root{--bg:#faf9f7;--fg:#1a1a18;--mut:#6b6b66;--line:#e0ded8;--card:#fff;--ac:#0f6e56;--acbg:#e1f5ee;--warn:#854f0b;--warnbg:#faeeda}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.wrap{max-width:760px;margin:0 auto;padding:32px 20px 80px}
+.wrap{max-width:820px;margin:0 auto;padding:32px 20px 80px}
 h1{font-size:22px;font-weight:500;margin:0 0 4px}
+h2{font-size:16px;font-weight:500;margin:0 0 12px}
 .sub{color:var(--mut);font-size:14px;margin-bottom:28px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
-textarea{width:100%;min-height:96px;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:15px;resize:vertical;background:var(--bg)}
+textarea{width:100%;min-height:92px;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:15px;resize:vertical;background:var(--bg)}
 button{font:inherit;font-size:15px;padding:10px 18px;border-radius:8px;border:1px solid var(--line);background:var(--card);cursor:pointer}
 button.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
+button.chip{font-size:13px;padding:6px 12px;border-radius:99px;color:var(--mut)}
 button:disabled{opacity:.5;cursor:default}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
 .ev{border-left:3px solid var(--ac);padding:10px 14px;margin:10px 0;background:var(--bg);border-radius:0 6px 6px 0}
@@ -203,12 +225,18 @@ button:disabled{opacity:.5;cursor:default}
 .meta{color:var(--mut);font-size:13px}
 .quote{font-style:italic;color:var(--mut);font-size:14px;margin-top:4px}
 pre{white-space:pre-wrap;font:inherit;background:var(--bg);padding:14px;border-radius:8px;margin:0}
-.pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;background:#e1f5ee;color:#0f6e56;margin-left:6px}
+.pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;background:var(--acbg);color:var(--ac);margin-left:6px}
+.pill.w{background:var(--warnbg);color:var(--warn)}
 .err{color:#a32d2d;font-size:14px;margin-top:10px}
 .hide{display:none}
 label{font-size:13px;color:var(--mut);display:block;margin-bottom:6px}
 input[type=password]{padding:9px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;width:200px}
-h2{font-size:16px;font-weight:500;margin:0 0 12px}
+.find{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);cursor:pointer}
+.find:last-child{border-bottom:0}
+.find:hover{background:var(--bg)}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.disc{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}
+.disc:last-child{border-bottom:0}
 </style></head><body><div class="wrap">
 <h1>Frontline</h1>
 <div class="sub">A salesperson's voice note becomes a structured, evidence-backed signal.</div>
@@ -223,41 +251,52 @@ h2{font-size:16px;font-weight:500;margin:0 0 12px}
 <div id="main" class="hide">
   <div class="card">
     <h2>Send a note</h2>
-    <textarea id="text" placeholder="Type what happened, in Hindi, English, or both.
-
-e.g. Sir ko Model X pasand aayi thi but EMI thoda zyada lag raha tha. Ather bhi dekh ke aaye hain."></textarea>
+    <textarea id="text" placeholder="Type what happened, in Hindi, English, or both."></textarea>
     <div class="row">
       <button class="primary" onclick="send()">Process</button>
       <button id="rec" onclick="toggleRec()">Record</button>
       <span class="meta" id="status"></span>
     </div>
+    <div class="row" id="samples"></div>
     <div class="err hide" id="err"></div>
   </div>
   <div id="out"></div>
+  <div id="agg"></div>
 </div>
 
 <script>
 let code="",rec=null,chunks=[];
+const SAMPLES=[
+ ["Price + rival","Sir ko Model X pasand aayi thi but EMI thoda zyada lag raha tha, around 4,500 bol rahe the woh 4,000 tak hi karna chahte the. Exchange mein bhi kam de rahe hain. Ather bhi dekh ke aaye hain."],
+ ["Range doubt","Customer Model X ke liye aaya tha, range ko lekar doubt tha, 150 km claim karte ho par actual kitna chalegi. Charging station ghar ke paas ka pooch raha tha. Ola wale ne 180 bola tha."],
+ ["Booked","Ek family aayi thi, Model Y dekha, down payment 25,000 zyada lag raha tha, baaki design bahut pasand aaya. Booking kar di."],
+ ["Nothing to extract","Haan toh main nikal raha hoon ab, kal milte hain."]
+];
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function unlock(){
   code=document.getElementById('code').value;
   fetch('/api/aggregate',{headers:{'x-access-code':code}}).then(r=>{
     if(!r.ok){document.getElementById('gateErr').classList.remove('hide');return;}
     document.getElementById('gate').classList.add('hide');
     document.getElementById('main').classList.remove('hide');
+    document.getElementById('samples').innerHTML=SAMPLES.map((s,i)=>
+      '<button class="chip" onclick="useSample('+i+')">'+esc(s[0])+'</button>').join('');
+    loadAgg();
   });
 }
-function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function useSample(i){document.getElementById('text').value=SAMPLES[i][1];}
 async function post(fd){
   document.getElementById('err').classList.add('hide');
   document.getElementById('status').textContent='working...';
   const r=await fetch('/api/process',{method:'POST',headers:{'x-access-code':code},body:fd});
   document.getElementById('status').textContent='';
-  if(!r.ok){const e=document.getElementById('err');e.textContent=(await r.json()).detail||'Failed';e.classList.remove('hide');return;}
-  render(await r.json());
+  if(!r.ok){const e=document.getElementById('err');
+    e.textContent=(await r.json()).detail||'Failed';e.classList.remove('hide');return;}
+  render(await r.json());loadAgg();
 }
 function send(){
   const t=document.getElementById('text').value.trim();
-  if(!t){document.getElementById('err').textContent='Type something first.';document.getElementById('err').classList.remove('hide');return;}
+  if(!t){const e=document.getElementById('err');e.textContent='Type something first.';e.classList.remove('hide');return;}
   const fd=new FormData();fd.append('text',t);post(fd);
 }
 async function toggleRec(){
@@ -271,18 +310,18 @@ async function toggleRec(){
       fd.append('audio',new Blob(chunks,{type:'audio/webm'}),'note.webm');
       fd.append('text','');post(fd);s.getTracks().forEach(t=>t.stop());};
     rec.start();b.textContent='Stop';
-  }catch(e){document.getElementById('err').textContent='Microphone unavailable — type instead.';
-    document.getElementById('err').classList.remove('hide');}
+  }catch(e){const el=document.getElementById('err');
+    el.textContent='Microphone unavailable \\u2014 type instead.';el.classList.remove('hide');}
 }
 function render(d){
   let h='<div class="card"><h2>Transcript <span class="pill">'+esc(d.engine)+'</span></h2><pre>'+esc(d.transcript)+'</pre></div>';
   h+='<div class="card"><h2>Extracted</h2>';
-  if(!d.events.length){h+='<div class="meta">Nothing extractable. Flagged unclear rather than guessed — the system does not invent an objection that was never said.</div>';}
+  if(!d.events.length){h+='<div class="meta">Nothing extractable. Flagged unclear rather than guessed \\u2014 the system will not invent an objection that was never said.</div>';}
   d.events.forEach(e=>{
     h+='<div class="ev"><b>'+esc(e.label)+'</b><span class="pill">conf '+e.confidence+'</span>';
     h+='<div class="meta">'+esc(e.path);
-    if(e.subject)h+=' · '+esc(e.subject);
-    if(e.rival)h+=' · vs '+esc(e.rival);
+    if(e.subject)h+=' \\u00b7 '+esc(e.subject);
+    if(e.rival)h+=' \\u00b7 vs '+esc(e.rival);
     h+='</div>';
     if(e.span)h+='<div class="quote">"'+esc(e.span)+'"</div>';
     h+='</div>';
@@ -290,6 +329,47 @@ function render(d){
   h+='</div><div class="card"><h2>Card sent back to the rep</h2><pre>'+esc(d.card)+'</pre></div>';
   document.getElementById('out').innerHTML=h;
   window.scrollTo({top:document.getElementById('out').offsetTop-20,behavior:'smooth'});
+}
+async function loadAgg(){
+  const h={'x-access-code':code};
+  const [a,dsc]=await Promise.all([
+    fetch('/api/aggregate',{headers:h}).then(r=>r.json()),
+    fetch('/api/discoveries',{headers:h}).then(r=>r.json())]);
+  let s='';
+  if(a.findings.length){
+    s+='<div class="card"><h2>Across every note so far</h2>';
+    s+='<div class="meta" style="margin-bottom:10px">Based on '+a.denominator+' reported interactions. Click any line for the evidence.</div>';
+    a.findings.forEach(f=>{
+      s+='<div class="find" onclick="eviden(\\''+f.path+'\\')">';
+      s+='<div><b>'+esc(f.label)+'</b><span class="pill'+(f.confidence==='Low'?' w':'')+'">'+f.confidence+'</span></div>';
+      s+='<div class="num meta">'+f.pct+'% of '+a.denominator+' \\u00b7 n='+f.n+' \\u00b7 '+f.people+' '+(f.people===1?'person':'people')+'</div></div>';
+    });
+    s+='<div class="meta" style="margin-top:12px">Confidence is computed, not chosen: High needs 100+ observations across 10+ people at 70%+ coverage. A small sample is honestly labelled Low.</div>';
+    s+='</div><div id="evbox"></div>';
+  }
+  if(dsc.discoveries.length){
+    s+='<div class="card"><h2>Names we did not recognise</h2>';
+    s+='<div class="meta" style="margin-bottom:10px">Reps said these; nothing in the taxonomy matches. A brand entering the market shows up here first.</div>';
+    dsc.discoveries.forEach(d=>{
+      s+='<div class="disc"><div><b>'+esc(d.name)+'</b> <span class="meta">('+esc(d.slot)+')</span></div>';
+      s+='<div class="meta">seen '+d.seen+'\\u00d7</div></div>';
+    });
+    s+='</div>';
+  }
+  document.getElementById('agg').innerHTML=s;
+}
+async function eviden(path){
+  const r=await fetch('/api/evidence/'+encodeURIComponent(path),{headers:{'x-access-code':code}});
+  const d=await r.json();
+  let s='<div class="card"><h2>Evidence behind that number</h2>';
+  d.evidence.forEach(e=>{
+    s+='<div class="ev"><div class="meta">'+esc(e.date)+' \\u00b7 '+esc(e.rep)+' \\u00b7 '+esc(e.store)+' \\u00b7 conf '+e.confidence+'</div>';
+    s+='<div class="quote">"'+esc(e.said)+'"</div></div>';
+  });
+  if(!d.evidence.length)s+='<div class="meta">No active events.</div>';
+  s+='</div>';
+  document.getElementById('evbox').innerHTML=s;
+  document.getElementById('evbox').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 document.getElementById('code').addEventListener('keydown',e=>{if(e.key==='Enter')unlock()});
 </script></div></body></html>"""

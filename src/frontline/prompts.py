@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from .taxonomy import Taxonomy
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 SYSTEM = """You read voice notes from retail salespeople and turn them into structured events.
 
@@ -30,6 +30,8 @@ RULES
 - Extract only what the salesperson actually said. Never infer an objection from absence.
 - A customer who did not buy has NOT thereby raised a price objection. If they did not say it, it does not exist.
 - One event per distinct claim. Do not merge two objections into one event.
+- A rival brand mentioned at all is its own event under `competitive`, even when no objection is attached to it. "Ather bhi dekh ke aaye hain" is a cross_shopping event. Set the rival slot on it.
+- Fill the rival slot with the brand name exactly as the rep said it, even if you do not recognise the brand. An unknown name is useful; a dropped one is not.
 - Quote the exact span of the transcript each event came from, verbatim.
 - Set interaction_count to how many separate customer conversations the note describes (usually 1).
 - If the note is inaudible, off-topic, or has no extractable content: return no events and set unclear = true.

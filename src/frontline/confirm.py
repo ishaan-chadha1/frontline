@@ -37,19 +37,27 @@ def render_card(conn, capture_id: int) -> str:
         )
 
     lines = ["Got it — here's what I recorded:", ""]
-    seen_subject = None
+    subject = next((r["subject"] for r in rows if r["subject"]), None)
+    if subject:
+        lines.append(f"• {subject}")
+
+    # One line per idea. A rival named three times is still one fact to confirm.
+    rivals: list[str] = []
+    status: str | None = None
     for r in rows:
-        kind = DIMENSION_LABEL.get(r["dimension"], r["dimension"])
+        if r["rival"] and r["rival"] not in rivals:
+            rivals.append(r["rival"])
         if r["dimension"] == "outcome":
-            lines.append(f"• Status: {r['label'].lower()}")
-        else:
-            lines.append(f"• {kind.capitalize()}: {r['label']}")
-        if r["subject"] and r["subject"] != seen_subject:
-            seen_subject = r["subject"]
-        if r["rival"]:
-            lines.append(f"• Also considering {r['rival']}")
-    if seen_subject:
-        lines.insert(2, f"• {seen_subject}")
+            status = r["label"].lower()
+        elif r["dimension"] == "objection":
+            lines.append(f"• Objection: {r['label']}")
+        elif r["dimension"] == "brand_attribute":
+            lines.append(f"• Brand: {r['label']}")
+
+    if rivals:
+        lines.append("• Also considering " + ", ".join(rivals))
+    if status:
+        lines.append(f"• Status: {status}")
 
     lines += ["", "Reply 1 if that's right,", "or just tell me what to fix."]
     return "\n".join(lines)

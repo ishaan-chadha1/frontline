@@ -51,3 +51,30 @@ def record_unresolved(conn, event_id: int, slot: str, surface: str) -> None:
             "INSERT INTO unresolved_mention (event_id, slot, surface_form) VALUES (?,?,?)",
             (event_id, slot, surface),
         )
+
+
+def prune_unresolved(conn, tax) -> int:
+    """Close queue entries that are no longer open questions.
+
+    Two things retire a mention: the slot left the taxonomy, or someone added
+    the alias so it now resolves. Leaving either in the queue makes the review
+    list look busy while saying nothing.
+    """
+    live_slots = set(tax.slots)
+    closed = 0
+    for row in conn.execute(
+        "SELECT id, slot, surface_form FROM unresolved_mention WHERE reviewed = 0"
+    ).fetchall():
+        slot = row["slot"]
+        if slot not in live_slots:
+            stale = True
+        else:
+            entity_type = tax.slots[slot].entity_type
+            stale = resolve(conn, entity_type, row["surface_form"]).matched
+        if stale:
+            conn.execute(
+                "UPDATE unresolved_mention SET reviewed = 1 WHERE id = ?", (row["id"],)
+            )
+            closed += 1
+    conn.commit()
+    return closed

@@ -1,13 +1,12 @@
 # EV two-wheeler retail. A vertical is this file -- never an ALTER TABLE.
 vertical: ev_two_wheeler
-version: 1.0.0
+version: 1.1.0
 language_hints: [hi, en, hi-en]
 
 # What the fact table's generic slots mean in this industry.
 slots:
   subject: { entity_type: product,    label: Model }
   rival:   { entity_type: competitor, label: Competitor }
-  actor:   { entity_type: lead,       label: Customer }
 
 # What the org hierarchy's levels are called here.
 org_levels: [country, state, cluster, store]
@@ -54,6 +53,17 @@ dimensions:
       availability: { label: Stock availability }
       resale:       { label: Resale value }
 
+  competitive:
+    description: The customer referenced a rival brand. Cross-shopping is a fact
+      in its own right -- a rival can be mentioned with no objection attached,
+      and that mention is still the signal a leadership team wants.
+    nodes:
+      cross_shopping:  { label: Also considering a rival }
+      switched_from:   { label: Currently owns a rival }
+      rival_preferred: { label: Leaning towards a rival }
+      rival_cheaper:   { label: Rival quoted a better price }
+      rival_better_spec: { label: Rival claimed better specs }
+
   outcome:
     description: Where the interaction ended up
     nodes:
@@ -64,6 +74,18 @@ dimensions:
 
 seed_entities:
   competitor:
+    - name: River
+      aliases: [river, river indie, indie, rivar]
+    - name: Ultraviolette
+      aliases: [ultraviolette, ultra violette, uv, f77]
+    - name: Simple Energy
+      aliases: [simple, simple energy, simple one]
+    - name: Revolt
+      aliases: [revolt, revolt motors, rv400]
+    - name: Okaya
+      aliases: [okaya]
+    - name: Pure EV
+      aliases: [pure ev, pureev, pure]
     - name: Ola
       aliases: [ola, ola electric, ola s1, olaa]
     - name: Ather
