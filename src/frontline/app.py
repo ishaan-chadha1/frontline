@@ -8,6 +8,7 @@ it must never sit open on a public URL.
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from .confirm import render_card
 from .db import connect, init_schema
 from .demo import seed
 from .pipeline import extract_capture, ingest_text
+from .enrich import approve as approve_proposal, reject as reject_proposal
 from .resolve import prune_unresolved
 
 ACCESS_CODE = os.getenv("ACCESS_CODE", "")
@@ -268,6 +270,45 @@ def discoveries(request: Request, conn=Depends(db)):
     ]}
 
 
+@app.get("/api/proposals")
+def proposals(request: Request, conn=Depends(db)):
+    """What the enricher worked out, awaiting a human decision.
+
+    These are proposals, never facts: a grounded lookup can be confidently
+    wrong, and a hallucinated brand becoming a real entity would corrupt every
+    competitive number. Nothing here touches the fact table until approved.
+    """
+    require_code(request)
+    rows = conn.execute(
+        "SELECT id, surface_form, proposed_name, entity_type, description, confidence, "
+        "is_relevant, occurrences, sources_json FROM entity_proposal "
+        "WHERE status = 'pending' ORDER BY is_relevant DESC, occurrences DESC LIMIT 12"
+    ).fetchall()
+    return {"proposals": [
+        {
+            "id": r["id"], "surface": r["surface_form"], "name": r["proposed_name"],
+            "entity_type": r["entity_type"], "description": r["description"],
+            "confidence": r["confidence"], "relevant": bool(r["is_relevant"]),
+            "seen": r["occurrences"],
+            "sources": json.loads(r["sources_json"] or "[]"),
+        } for r in rows
+    ]}
+
+
+@app.post("/api/proposals/{proposal_id}/{decision}")
+def decide(proposal_id: int, decision: str, request: Request, conn=Depends(db)):
+    require_code(request)
+    if decision == "approve":
+        try:
+            return approve_proposal(conn, proposal_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+    if decision == "reject":
+        reject_proposal(conn, proposal_id)
+        return {"ok": True}
+    raise HTTPException(400, "decision must be approve or reject")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return INDEX_HTML
@@ -404,9 +445,10 @@ function render(d){
 }
 async function loadAgg(){
   const h={'x-access-code':code};
-  const [a,dsc]=await Promise.all([
+  const [a,dsc,prop]=await Promise.all([
     fetch('/api/aggregate',{headers:h}).then(r=>r.json()),
-    fetch('/api/discoveries',{headers:h}).then(r=>r.json())]);
+    fetch('/api/discoveries',{headers:h}).then(r=>r.json()),
+    fetch('/api/proposals',{headers:h}).then(r=>r.json())]);
   let s='';
   if(a.simulated_count){
     s+='<div class="card" style="border-color:#EF9F27;background:#FAEEDA">';
@@ -436,9 +478,32 @@ async function loadAgg(){
     s+='<div class="meta" style="margin-top:14px">Confidence is computed, not chosen. High requires 100+ interactions, 10+ people, and 70%+ coverage \\u2014 a thin or biased sample is labelled honestly rather than flattered.</div>';
     s+='</div><div id="evbox"></div>';
   }
-  if(dsc.discoveries.length){
+  if(prop.proposals.length){
+    const real=prop.proposals.filter(x=>x.relevant), junk=prop.proposals.filter(x=>!x.relevant);
+    s+='<div class="card"><h2>Names the system worked out</h2>';
+    s+='<div class="meta" style="margin-bottom:12px">Reps said these; nothing in the taxonomy matched. ';
+    s+='Gemini searched the web to identify them. Nothing is added until you approve it.</div>';
+    real.forEach(x=>{
+      s+='<div class="ev"><b>'+esc(x.name||x.surface)+'</b>';
+      s+='<span class="pill">'+esc(x.entity_type||'?')+'</span>';
+      s+='<span class="pill">conf '+x.confidence+'</span>';
+      s+='<div class="meta">heard as \\u201c'+esc(x.surface)+'\\u201d, '+x.seen+'\\u00d7</div>';
+      s+='<div class="quote" style="font-style:normal">'+esc(x.description||'')+'</div>';
+      if(x.sources.length){s+='<div class="meta">Checked against: ';
+        s+=x.sources.map(src=>'<a href="'+esc(src.uri)+'">'+esc((src.title||'source').slice(0,34))+'</a>').join(' \\u00b7 ');
+        s+='</div>';}
+      else{s+='<div class="meta">From model knowledge \\u2014 no web sources cited. Worth a check.</div>';}
+      s+='<div class="row"><button class="primary" onclick="decide('+x.id+',\\'approve\\')">Add as '+esc(x.entity_type||'entity')+'</button>';
+      s+='<button onclick="decide('+x.id+',\\'reject\\')">Not relevant</button></div></div>';
+    });
+    if(junk.length){
+      s+='<div class="meta" style="margin-top:14px">Dismissed as not a brand: ';
+      s+=junk.map(x=>'\\u201c'+esc(x.surface)+'\\u201d').join(', ')+'</div>';
+    }
+    s+='</div>';
+  } else if(dsc.discoveries.length){
     s+='<div class="card"><h2>Names we did not recognise</h2>';
-    s+='<div class="meta" style="margin-bottom:10px">Reps said these; nothing in the taxonomy matches. A brand entering the market shows up here first.</div>';
+    s+='<div class="meta" style="margin-bottom:10px">Reps said these; nothing in the taxonomy matches. Run enrichment to identify them.</div>';
     dsc.discoveries.forEach(d=>{
       s+='<div class="disc"><div><b>'+esc(d.name)+'</b> <span class="meta">('+esc(d.slot)+')</span></div>';
       s+='<div class="meta">seen '+d.seen+'\\u00d7</div></div>';
@@ -446,6 +511,10 @@ async function loadAgg(){
     s+='</div>';
   }
   document.getElementById('agg').innerHTML=s;
+}
+async function decide(id,what){
+  await fetch('/api/proposals/'+id+'/'+what,{method:'POST',headers:{'x-access-code':code}});
+  loadAgg();
 }
 async function eviden(path){
   const r=await fetch('/api/evidence/'+encodeURIComponent(path),{headers:{'x-access-code':code}});

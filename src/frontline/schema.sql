@@ -261,6 +261,29 @@ CREATE TABLE IF NOT EXISTS person_day_profile (
   PRIMARY KEY (person_id, occurred_on)
 ) WITHOUT ROWID;
 
+-- Enrichment proposals. Deliberately NOT the fact table: a grounded lookup can
+-- be wrong, so it produces something a human approves rather than a row that
+-- silently becomes a competitor number.
+CREATE TABLE IF NOT EXISTS entity_proposal (
+  id             INTEGER PRIMARY KEY,
+  surface_form   TEXT    NOT NULL UNIQUE,   -- what the rep actually said
+  slot           TEXT,                       -- which slot it appeared in
+  proposed_name  TEXT,                       -- canonical name, if identified
+  entity_type    TEXT,                       -- competitor | product | ...
+  description    TEXT,
+  aliases_json   TEXT,
+  confidence     INTEGER NOT NULL DEFAULT 0,
+  is_relevant    INTEGER NOT NULL DEFAULT 1, -- false for a mishearing or a person's name
+  sources_json   TEXT,
+  model          TEXT,
+  occurrences    INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT    NOT NULL,
+  status         TEXT    NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+  decided_at     TEXT,
+  entity_id      INTEGER REFERENCES entity(id)
+);
+CREATE INDEX IF NOT EXISTS ix_proposal_status ON entity_proposal(status, occurrences DESC);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
