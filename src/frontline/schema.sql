@@ -106,7 +106,10 @@ CREATE TABLE IF NOT EXISTS raw_capture (
   received_at    TEXT    NOT NULL,
   prompt_id      INTEGER REFERENCES capture_prompt(id),
   status         TEXT    NOT NULL DEFAULT 'received',
-  failure_reason TEXT
+  failure_reason TEXT,
+  -- Seeded demo data must never be mistakable for real dealer data, including
+  -- six months from now when nobody remembers which is which.
+  is_simulated   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_capture_person_date ON raw_capture(person_id, captured_on);
 CREATE INDEX IF NOT EXISTS ix_capture_status ON raw_capture(status);

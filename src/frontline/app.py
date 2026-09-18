@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -120,33 +120,99 @@ async def process_note(
 
 
 @app.get("/api/aggregate")
-def aggregate(request: Request, conn=Depends(db)):
+def aggregate(request: Request, days: int = 14, conn=Depends(db)):
+    """Findings for a trailing window, against the window before it.
+
+    Two things here are correctness, not presentation. Findings roll up to the
+    parent category -- "Price objection", not five separate leaves that each
+    look small. And the numerator counts distinct CAPTURES, not events: a note
+    mentioning EMI twice is one interaction with a price objection, and
+    counting events would let a single talkative note inflate a percentage.
+    """
     require_code(request)
-    total = conn.execute(
-        "SELECT COUNT(*) AS c FROM raw_capture WHERE status = 'extracted'"
+    today = date.today()
+    cur_from = (today - timedelta(days=days - 1)).isoformat()
+    prev_from = (today - timedelta(days=2 * days - 1)).isoformat()
+    prev_to = (today - timedelta(days=days)).isoformat()
+
+    def denominator(frm, to):
+        return conn.execute(
+            "SELECT COUNT(*) AS c FROM raw_capture WHERE status = 'extracted' "
+            "AND captured_on BETWEEN ? AND ?", (frm, to),
+        ).fetchone()["c"]
+
+    total = denominator(cur_from, today.isoformat())
+    prev_total = denominator(prev_from, prev_to)
+
+    # Roll a leaf up to its category: depth-3 nodes report under their parent,
+    # depth-2 nodes are already the category.
+    GROUPED = """
+        SELECT g.id AS gid, g.label AS label, g.path AS path,
+               COUNT(DISTINCT e.capture_id) AS n,
+               COUNT(DISTINCT e.person_id) AS people,
+               AVG(e.confidence) AS conf
+        FROM event e
+        JOIN taxonomy_node t ON t.id = e.taxonomy_node_id
+        JOIN taxonomy_node g ON g.id = (CASE WHEN t.parent_id IS NOT NULL THEN t.parent_id ELSE t.id END)
+        WHERE e.is_active = 1 AND t.dimension IN ('objection', 'competitive')
+          AND e.occurred_on BETWEEN ? AND ?
+        GROUP BY g.id, g.label, g.path
+    """
+    rows = conn.execute(GROUPED + " ORDER BY n DESC LIMIT 8",
+                        (cur_from, today.isoformat())).fetchall()
+    prior = {r["gid"]: r["n"] for r in
+             conn.execute(GROUPED, (prev_from, prev_to)).fetchall()}
+
+    # Coverage is what makes a confidence grade mean anything. Without an
+    # independent expected-capture count, High is unreachable by design.
+    cov_row = conn.execute(
+        "SELECT SUM(expected_captures) AS exp FROM shift WHERE occurred_on BETWEEN ? AND ?",
+        (cur_from, today.isoformat()),
+    ).fetchone()
+    expected = cov_row["exp"] or 0
+    coverage = round(100 * total / expected) if expected else 0
+
+    def grade(n, people, conf):
+        if n >= 100 and coverage >= 70 and people >= 10 and (conf or 0) >= 75:
+            return "High"
+        if n >= 30 and coverage >= 50 and people >= 5:
+            return "Medium"
+        return "Low" if n >= 10 else "Very low"
+
+    findings = []
+    for r in rows:
+        pct = round(100 * r["n"] / total) if total else 0
+        prev_pct = round(100 * prior.get(r["gid"], 0) / prev_total) if prev_total else None
+        findings.append({
+            "label": r["label"], "path": r["path"], "n": r["n"], "people": r["people"],
+            "pct": pct,
+            "delta_pp": (pct - prev_pct) if prev_pct is not None else None,
+            "confidence": grade(r["n"], r["people"], r["conf"]),
+        })
+
+    top_units = {}
+    for f in findings[:3]:
+        top = conn.execute(
+            """SELECT o.name AS name, COUNT(DISTINCT e.capture_id) AS n
+               FROM event e
+               JOIN taxonomy_node t ON t.id = e.taxonomy_node_id
+               JOIN taxonomy_node g ON g.id = (CASE WHEN t.parent_id IS NOT NULL THEN t.parent_id ELSE t.id END)
+               JOIN org_unit o ON o.id = e.unit_l2
+               WHERE e.is_active = 1 AND g.path = ? AND e.occurred_on BETWEEN ? AND ?
+               GROUP BY o.name ORDER BY n DESC LIMIT 2""",
+            (f["path"], cur_from, today.isoformat()),
+        ).fetchall()
+        top_units[f["path"]] = [r["name"] for r in top]
+
+    simulated = conn.execute(
+        "SELECT COUNT(*) AS c FROM raw_capture WHERE is_simulated = 1"
     ).fetchone()["c"]
-    rows = conn.execute(
-        """SELECT t.id, t.label, t.path, COUNT(*) AS n,
-                  COUNT(DISTINCT e.person_id) AS people
-           FROM event e JOIN taxonomy_node t ON t.id = e.taxonomy_node_id
-           WHERE e.is_active = 1 AND t.dimension IN ('objection', 'competitive')
-           GROUP BY t.id, t.label, t.path ORDER BY n DESC LIMIT 8""",
-    ).fetchall()
+
     return {
-        "denominator": total,
-        "findings": [
-            {
-                "label": r["label"], "path": r["path"], "n": r["n"],
-                "people": r["people"],
-                "pct": round(100 * r["n"] / total) if total else 0,
-                # Confidence is computed, never chosen. Demo data is tiny, so
-                # almost everything here is correctly Low -- that is the point.
-                "confidence": "High" if r["n"] >= 100 and r["people"] >= 10
-                else "Medium" if r["n"] >= 30 and r["people"] >= 5
-                else "Low",
-            }
-            for r in rows
-        ],
+        "denominator": total, "prev_denominator": prev_total,
+        "window_days": days, "coverage_pct": coverage,
+        "simulated_count": simulated, "real_count": max(total - simulated, 0),
+        "findings": findings, "top_units": top_units,
     }
 
 
@@ -155,22 +221,28 @@ def evidence(path: str, request: Request, conn=Depends(db)):
     require_code(request)
     rows = conn.execute(
         """SELECT e.id, e.confidence, e.occurred_on, p.name AS rep, o.name AS store,
-                  e.span_start, e.span_end, tr.text
+                  e.span_start, e.span_end, tr.text, t.label AS leaf
            FROM event e
            JOIN raw_capture rc ON rc.id = e.capture_id
            JOIN transcript tr ON tr.capture_id = rc.id
            JOIN person p ON p.id = e.person_id
            JOIN org_unit o ON o.id = e.unit_id
            JOIN taxonomy_node t ON t.id = e.taxonomy_node_id
-           WHERE t.path = ? AND e.is_active = 1 ORDER BY e.id DESC LIMIT 25""",
-        (path,),
+           JOIN taxonomy_node g ON g.id = (CASE WHEN t.parent_id IS NOT NULL
+                                           THEN t.parent_id ELSE t.id END)
+           -- Findings roll up to a category, so evidence has to match either the
+           -- category or a leaf directly: clicking "Price" must reach every EMI,
+           -- down payment and exchange-value note beneath it.
+           WHERE (g.path = ? OR t.path = ?) AND e.is_active = 1
+           ORDER BY e.id DESC LIMIT 25""",
+        (path, path),
     ).fetchall()
     return {
         "path": path,
         "evidence": [
             {
                 "event_id": r["id"], "date": r["occurred_on"], "rep": r["rep"],
-                "store": r["store"], "confidence": r["confidence"],
+                "store": r["store"], "confidence": r["confidence"], "leaf": r["leaf"],
                 "said": r["text"][r["span_start"]:r["span_end"]].strip()
                 if r["span_start"] is not None else r["text"][:160],
             }
@@ -336,15 +408,32 @@ async function loadAgg(){
     fetch('/api/aggregate',{headers:h}).then(r=>r.json()),
     fetch('/api/discoveries',{headers:h}).then(r=>r.json())]);
   let s='';
+  if(a.simulated_count){
+    s+='<div class="card" style="border-color:#EF9F27;background:#FAEEDA">';
+    s+='<b>Simulated dataset</b><div class="meta" style="color:#854F0B">';
+    s+=a.simulated_count+' generated notes across 20 reps, 5 stores, 3 states, 30 days. ';
+    s+='Patterns here are invented to show the shape of the output \\u2014 not market insight. ';
+    s+='Notes you add yourself are stored alongside them.</div></div>';
+  }
   if(a.findings.length){
-    s+='<div class="card"><h2>Across every note so far</h2>';
-    s+='<div class="meta" style="margin-bottom:10px">Based on '+a.denominator+' reported interactions. Click any line for the evidence.</div>';
+    s+='<div class="card"><h2>Last '+a.window_days+' days</h2>';
+    s+='<div class="meta" style="margin-bottom:12px">Based on <b>'+a.denominator+'</b> reported interactions';
+    if(a.coverage_pct)s+=' at <b>'+a.coverage_pct+'% coverage</b>';
+    s+='. Click any line for the evidence behind it.</div>';
     a.findings.forEach(f=>{
+      const low=(f.confidence==='Low'||f.confidence==='Very low');
       s+='<div class="find" onclick="eviden(\\''+f.path+'\\')">';
-      s+='<div><b>'+esc(f.label)+'</b><span class="pill'+(f.confidence==='Low'?' w':'')+'">'+f.confidence+'</span></div>';
+      s+='<div><b>'+esc(f.label)+'</b><span class="pill'+(low?' w':'')+'">'+f.confidence+'</span>';
+      if(f.delta_pp!==null&&f.delta_pp!==0){
+        const up=f.delta_pp>0;
+        s+='<span class="pill'+(up?' w':'')+'">'+(up?'\\u2191':'\\u2193')+Math.abs(f.delta_pp)+'pp</span>';
+      }
+      const tu=a.top_units[f.path];
+      if(tu&&tu.length)s+='<div class="meta">Highest in '+tu.map(esc).join(' + ')+'</div>';
+      s+='</div>';
       s+='<div class="num meta">'+f.pct+'% of '+a.denominator+' \\u00b7 n='+f.n+' \\u00b7 '+f.people+' '+(f.people===1?'person':'people')+'</div></div>';
     });
-    s+='<div class="meta" style="margin-top:12px">Confidence is computed, not chosen: High needs 100+ observations across 10+ people at 70%+ coverage. A small sample is honestly labelled Low.</div>';
+    s+='<div class="meta" style="margin-top:14px">Confidence is computed, not chosen. High requires 100+ interactions, 10+ people, and 70%+ coverage \\u2014 a thin or biased sample is labelled honestly rather than flattered.</div>';
     s+='</div><div id="evbox"></div>';
   }
   if(dsc.discoveries.length){
@@ -363,7 +452,9 @@ async function eviden(path){
   const d=await r.json();
   let s='<div class="card"><h2>Evidence behind that number</h2>';
   d.evidence.forEach(e=>{
-    s+='<div class="ev"><div class="meta">'+esc(e.date)+' \\u00b7 '+esc(e.rep)+' \\u00b7 '+esc(e.store)+' \\u00b7 conf '+e.confidence+'</div>';
+    s+='<div class="ev"><div class="meta">'+esc(e.date)+' \\u00b7 '+esc(e.rep)+' \\u00b7 '+esc(e.store);
+    if(e.leaf)s+=' \\u00b7 '+esc(e.leaf);
+    s+=' \\u00b7 conf '+e.confidence+'</div>';
     s+='<div class="quote">"'+esc(e.said)+'"</div></div>';
   });
   if(!d.evidence.length)s+='<div class="meta">No active events.</div>';

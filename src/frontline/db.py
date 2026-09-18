@@ -108,7 +108,15 @@ class Database:
     def execute(self, sql: str, params: Iterable[Any] = ()) -> Cursor:
         if self.is_postgres:
             cur = self._conn.cursor()
-            cur.execute(sql.replace("?", "%s"), tuple(params))
+            args = tuple(params)
+            if args:
+                # psycopg parses % as a placeholder marker, so a literal one --
+                # a LIKE pattern, say -- has to be doubled BEFORE ? becomes %s.
+                cur.execute(sql.replace("%", "%%").replace("?", "%s"), args)
+            else:
+                # No params means no parsing, so the SQL goes through untouched
+                # and a literal % needs no escaping.
+                cur.execute(sql)
             return Cursor(cur, True)
         return Cursor(self._conn.execute(sql, tuple(params)), False)
 
@@ -137,8 +145,38 @@ def connect(path: Path | None = None, url: str | None = None) -> Database:
     return Database(url=url, path=path)
 
 
+# Columns added after the first deployment. CREATE TABLE IF NOT EXISTS will not
+# add a column to a table that already exists, so they are applied separately.
+MIGRATIONS = [
+    ("raw_capture", "is_simulated", "INTEGER NOT NULL DEFAULT 0"),
+    ("shift", "count_source", "TEXT"),
+]
+
+
+def _has_column(db: Database, table: str, column: str) -> bool:
+    if db.is_postgres:
+        return db.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?",
+            (table, column),
+        ).fetchone() is not None
+    rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def migrate(db: Database) -> list[str]:
+    applied = []
+    for table, column, spec in MIGRATIONS:
+        if not _has_column(db, table, column):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
+            applied.append(f"{table}.{column}")
+    db.commit()
+    return applied
+
+
 def init_schema(db: Database) -> None:
     db.executescript(SCHEMA_FILE.read_text())
+    migrate(db)
 
 
 def table_names(db: Database) -> list[str]:
