@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import taxonomy as tax_mod
 from .asr import get_asr
-from .confirm import render_card
+from .confirm import card_items, render_card
 from .db import connect, init_schema
 from .demo import seed
 from .people import add_person, by_token, deactivate, list_people, stores
@@ -140,7 +140,7 @@ async def process_note(
         # time someone went looking for the recording.
         "audio_stored": audio_uri.startswith("gs://"),
         "rep": person["name"] if person else None,
-        "events": events, "card": render_card(conn, capture_id),
+        "events": events, "card": card_items(conn, capture_id),
     })
 
 
@@ -165,8 +165,21 @@ def correct(capture_id: int, request: Request, correction: str = Form(...),
         require_code(request)
     if not correction.strip():
         raise HTTPException(400, "Tell me what to fix")
+    before = card_items(conn, capture_id)
     apply_correction(conn, capture_id, correction.strip())
-    return {"ok": True, "card": render_card(conn, capture_id)}
+    after = card_items(conn, capture_id)
+
+    # A rep who cannot see what their correction changed has no reason to
+    # believe it landed, and stops bothering.
+    before_set = {(i["kind"], i["text"]) for i in before}
+    after_set = {(i["kind"], i["text"]) for i in after}
+    return {
+        "ok": True,
+        "before": before,
+        "after": after,
+        "removed": [{"kind": k, "text": v} for k, v in before_set - after_set],
+        "added": [{"kind": k, "text": v} for k, v in after_set - before_set],
+    }
 
 
 @app.get("/api/aggregate")
@@ -436,6 +449,14 @@ label{font-size:13px;color:var(--mut);display:block;margin-bottom:6px}
 .prow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
 .prow:last-child{border-bottom:0}
 code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:13px}
+.kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line)}
+.kv:last-child{border-bottom:0}
+.kv .k{color:var(--mut);font-size:13px;min-width:130px}
+.kv .v{font-weight:500}
+.gone .v{text-decoration:line-through;color:var(--mut);font-weight:400}
+.new .v{color:var(--ac)}
+.banner{display:flex;gap:8px;align-items:center;padding:10px 14px;border-radius:8px;
+  background:var(--acbg);color:var(--ac);font-size:14px}
 </style></head><body><div class="wrap">
 <h1 id="title">Frontline</h1>
 <div class="sub" id="subtitle">A salesperson's voice note becomes a structured, evidence-backed signal.</div>
@@ -562,30 +583,57 @@ function render(d){
     if(e.span)h+='<div class="quote">"'+esc(e.span)+'"</div>';
     h+='</div>';
   });
-  h+='</div><div class="card"><h2>Is this right?</h2><pre>'+esc(d.card)+'</pre>';
-  h+='<div class="row"><button class="primary" onclick="confirmIt()">Yes, that\\'s right</button>';
+  h+='</div><div class="card" id="cardbox"><h2>Is this right?</h2>';
+  h+='<div id="cardrows">'+rows(d.card)+'</div>';
+  h+='<div class="row" id="cardbtns"><button class="primary" onclick="confirmIt()">Yes, that\'s right</button>';
   h+='<button onclick="showFix()">Fix it</button></div>';
   h+='<div id="fixbox" class="hide" style="margin-top:12px">';
-  h+='<textarea id="fixtext" placeholder="What did I get wrong? e.g. nahi, EMI nahi tha, exchange value ka issue tha"></textarea>';
-  h+='<div class="row"><button class="primary" onclick="sendFix()">Send correction</button></div></div>';
-  h+='<div class="ok hide" id="thanks"></div></div>';
+  h+='<label>What did I get wrong?</label>';
+  h+='<textarea id="fixtext" placeholder="e.g. nahi, EMI nahi tha, exchange value ka issue tha"></textarea>';
+  h+='<div class="row"><button class="primary" id="fixbtn" onclick="sendFix()">Send correction</button>';
+  h+='<button onclick="hideFix()">Cancel</button></div></div>';
+  h+='<div id="result"></div></div>';
   document.getElementById('out').innerHTML=h;
   window.scrollTo({top:document.getElementById('out').offsetTop-20,behavior:'smooth'});
 }
-function showFix(){document.getElementById('fixbox').classList.remove('hide');}
+function rows(items,cls){
+  if(!items||!items.length)return '<div class="meta">Nothing recorded from this note.</div>';
+  return items.map(i=>'<div class="kv '+(cls||'')+'"><div class="k">'+esc(i.kind)+
+    '</div><div class="v">'+esc(i.text)+'</div></div>').join('');
+}
+function showFix(){
+  document.getElementById('fixbox').classList.remove('hide');
+  document.getElementById('fixtext').focus();
+}
+function hideFix(){document.getElementById('fixbox').classList.add('hide');}
 async function confirmIt(){
   const fd=new FormData(); if(repToken)fd.append('token',repToken);
   await fetch('/api/capture/'+lastCapture+'/confirm',{method:'POST',headers:hdr(),body:fd});
-  const t=document.getElementById('thanks');t.textContent='Thanks \\u2014 recorded as confirmed.';t.classList.remove('hide');
+  document.getElementById('cardbtns').classList.add('hide');
+  document.getElementById('fixbox').classList.add('hide');
+  document.getElementById('result').innerHTML=
+    '<div class="banner" style="margin-top:12px">Confirmed. Thanks \\u2014 that helps the numbers.</div>';
 }
 async function sendFix(){
   const v=document.getElementById('fixtext').value.trim();
   if(!v)return;
+  const btn=document.getElementById('fixbtn');
+  btn.disabled=true;btn.textContent='Re-reading\\u2026';
   const fd=new FormData();fd.append('correction',v); if(repToken)fd.append('token',repToken);
-  const t=document.getElementById('thanks');t.textContent='Re-reading with your correction...';t.classList.remove('hide');
   const r=await fetch('/api/capture/'+lastCapture+'/correct',{method:'POST',headers:hdr(),body:fd});
+  btn.disabled=false;btn.textContent='Send correction';
+  if(!r.ok){document.getElementById('result').innerHTML=
+    '<div class="err">Could not apply that correction.</div>';return;}
   const d=await r.json();
-  if(d.card){t.textContent='Updated. Now recorded as:\\n'+d.card;t.style.whiteSpace='pre-wrap';}
+  document.getElementById('cardrows').innerHTML=rows(d.after);
+  document.getElementById('cardbtns').classList.add('hide');
+  document.getElementById('fixbox').classList.add('hide');
+  let s='<div class="banner" style="margin-top:12px">Updated \\u2014 thanks.</div>';
+  if(d.removed.length||d.added.length){
+    s+='<div style="margin-top:12px"><div class="meta" style="margin-bottom:4px">What changed</div>';
+    s+=rows(d.removed,'gone')+rows(d.added,'new')+'</div>';
+  }
+  document.getElementById('result').innerHTML=s;
 }
 async function loadAgg(){
   const h=hdr();
