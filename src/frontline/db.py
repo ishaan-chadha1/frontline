@@ -150,6 +150,7 @@ def connect(path: Path | None = None, url: str | None = None) -> Database:
 MIGRATIONS = [
     ("raw_capture", "is_simulated", "INTEGER NOT NULL DEFAULT 0"),
     ("shift", "count_source", "TEXT"),
+    ("person", "capture_token", "TEXT"),
 ]
 
 

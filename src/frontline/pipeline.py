@@ -48,7 +48,12 @@ def ingest_text(
     external_id: str,
     captured_on: str | None = None,
     audio_uri: str = "stub://none",
+    audio_sha256: str | None = None,
+    audio_bytes: int | None = None,
+    mime_type: str | None = None,
+    duration_ms: int | None = None,
     engine: str = "manual",
+    engine_version: str = "1",
 ) -> int:
     """Create a capture and its transcript. Idempotent on external_id, because
     the WhatsApp webhook will redeliver and duplicates would corrupt counts."""
@@ -65,14 +70,17 @@ def ingest_text(
     now = UTC_NOW()
     capture_id = conn.insert(
         "INSERT INTO raw_capture (external_id, person_id, unit_id, audio_sha256, "
-        "audio_uri, captured_at, captured_on, received_at, status) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "audio_uri, audio_bytes, mime_type, duration_ms, captured_at, captured_on, "
+        "received_at, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             external_id,
             person_id,
             person["unit_id"],
-            hashlib.sha256(text.encode()).hexdigest(),
+            audio_sha256 or hashlib.sha256(text.encode()).hexdigest(),
             audio_uri,
+            audio_bytes,
+            mime_type,
+            duration_ms,
             now,
             captured_on or date.today().isoformat(),
             now,
@@ -82,7 +90,7 @@ def ingest_text(
     conn.execute(
         "INSERT INTO transcript (capture_id, engine, engine_version, text, created_at) "
         "VALUES (?,?,?,?,?)",
-        (capture_id, engine, "1", text, now),
+        (capture_id, engine, engine_version, text, now),
     )
     conn.commit()
     return capture_id
@@ -182,3 +190,59 @@ def process(conn, *, person_id: int, text: str, external_id: str, provider=None)
     capture_id = ingest_text(conn, person_id=person_id, text=text, external_id=external_id)
     run_id = extract_capture(conn, capture_id, provider)
     return {"capture_id": capture_id, "run_id": run_id, "card": render_card(conn, capture_id)}
+
+
+def apply_correction(conn, capture_id: int, correction: str) -> int:
+    """Re-extract with the rep's correction alongside the original transcript.
+
+    The prior run is superseded rather than edited, so the wrong answer survives
+    next to the right one -- which is exactly what makes the pair a labelled
+    training example instead of a silent overwrite.
+    """
+    transcript = conn.execute(
+        "SELECT text FROM transcript WHERE capture_id = ? AND is_active = 1 "
+        "ORDER BY id DESC LIMIT 1", (capture_id,),
+    ).fetchone()
+    if transcript is None:
+        raise ValueError(f"capture {capture_id} has no transcript")
+
+    combined = (
+        f"{transcript['text']}\n\n"
+        f"[The salesperson reviewed the extraction and corrected it: {correction}]\n"
+        "Treat the correction as authoritative where it disagrees with the note."
+    )
+    original = transcript["text"]
+    conn.execute(
+        "UPDATE transcript SET text = ? WHERE capture_id = ? AND is_active = 1",
+        (combined, capture_id),
+    )
+    try:
+        run_id = extract_capture(conn, capture_id)
+    finally:
+        # The transcript is evidence; the correction context was only ever a
+        # prompt device and must not end up quoted back as something the rep said.
+        conn.execute(
+            "UPDATE transcript SET text = ? WHERE capture_id = ? AND is_active = 1",
+            (original, capture_id),
+        )
+        conn.commit()
+
+    conn.execute(
+        "INSERT INTO confirmation (capture_id, sent_at, responded_at, response_type, "
+        "correction_text, new_run_id) VALUES (?,?,?,?,?,?)",
+        (capture_id, UTC_NOW(), UTC_NOW(), "corrected", correction, run_id),
+    )
+    conn.commit()
+    return run_id
+
+
+def record_confirmation(conn, capture_id: int) -> None:
+    conn.execute(
+        "INSERT INTO confirmation (capture_id, sent_at, responded_at, response_type) "
+        "VALUES (?,?,?,'confirmed')", (capture_id, UTC_NOW(), UTC_NOW()),
+    )
+    conn.execute(
+        "UPDATE event SET rep_confirmed = 1 WHERE capture_id = ? AND is_active = 1",
+        (capture_id,),
+    )
+    conn.commit()

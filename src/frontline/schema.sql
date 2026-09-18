@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS person (
   reports_to_id  INTEGER REFERENCES person(id),
   language_pref  TEXT,
   joined_on      TEXT,
+  -- A per-rep capture link. Weak authentication by design: for a pilot cohort
+  -- you know by name, zero friction matters more, and friction is what kills
+  -- capture. Not suitable for a wide rollout.
+  capture_token  TEXT UNIQUE,
   is_active      INTEGER NOT NULL DEFAULT 1
 );
 
