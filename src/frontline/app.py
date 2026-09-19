@@ -629,7 +629,7 @@ function render(d){
   });
   h+='</div><div class="card" id="cardbox"><h2>Is this right?</h2>';
   h+='<div id="cardrows">'+rows(d.card)+'</div>';
-  h+='<div class="row" id="cardbtns"><button class="primary" onclick="confirmIt()">Yes, that\'s right</button>';
+  h+='<div class="row" id="cardbtns"><button class="primary" onclick="confirmIt()">Yes, that&#39;s right</button>';
   h+='<button onclick="showFix()">Fix it</button></div>';
   h+='<div id="fixbox" class="hide" style="margin-top:12px">';
   h+='<label>What did I get wrong?</label>';
