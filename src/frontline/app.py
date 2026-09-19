@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile, File
@@ -29,6 +31,31 @@ from .resolve import prune_unresolved
 
 ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 
+# Every processed note costs money. A public URL behind a short code has no
+# natural ceiling, so the ceiling is explicit: nothing about a demo justifies
+# an unbounded bill.
+DAILY_CAP = int(os.getenv("DAILY_NOTE_CAP", "300"))
+BURST_PER_MIN = int(os.getenv("BURST_PER_MIN", "12"))
+_recent: deque[float] = deque(maxlen=400)
+
+
+def check_budget(conn) -> None:
+    now = time.time()
+    while _recent and now - _recent[0] > 60:
+        _recent.popleft()
+    if len(_recent) >= BURST_PER_MIN:
+        raise HTTPException(429, "Too many notes at once. Wait a minute and try again.")
+
+    today = date.today().isoformat()
+    used = conn.execute(
+        "SELECT COUNT(*) AS c FROM raw_capture "
+        "WHERE captured_on = ? AND is_simulated = 0", (today,),
+    ).fetchone()["c"]
+    if used >= DAILY_CAP:
+        raise HTTPException(
+            429, f"Daily limit of {DAILY_CAP} notes reached. Resets tomorrow.")
+    _recent.append(now)
+
 app = FastAPI(title="Frontline", docs_url=None, redoc_url=None)
 
 
@@ -44,7 +71,8 @@ def require_code(request: Request) -> None:
     if not ACCESS_CODE:
         return
     supplied = request.headers.get("x-access-code") or request.query_params.get("code")
-    if not supplied or not secrets.compare_digest(supplied, ACCESS_CODE):
+    supplied = (supplied or "").strip()
+    if not supplied or not secrets.compare_digest(supplied, ACCESS_CODE.strip()):
         raise HTTPException(status_code=401, detail="Invalid access code")
 
 
@@ -78,6 +106,7 @@ async def process_note(
     person = by_token(conn, token) if token else None
     if person is None:
         require_code(request)
+    check_budget(conn)
     transcript, engine, engine_version = text.strip(), "typed", "1"
     audio_uri, audio_sha, audio_len, mime = "typed://none", None, None, None
 
@@ -85,6 +114,8 @@ async def process_note(
         raw = await audio.read()
         if not raw:
             raise HTTPException(400, "Empty recording")
+        if len(raw) > 12 * 1024 * 1024:
+            raise HTTPException(413, "That recording is too long. Keep it under a minute or two.")
         mime = (audio.content_type or "audio/webm").split(";")[0]
         # Persist BEFORE transcribing. The bytes are the bottom of the evidence
         # chain and the only thing that makes re-transcription possible later.
@@ -422,10 +453,10 @@ h1{font-size:22px;font-weight:500;margin:0 0 4px}
 h2{font-size:16px;font-weight:500;margin:0 0 12px}
 .sub{color:var(--mut);font-size:14px;margin-bottom:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
-textarea{width:100%;min-height:92px;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:15px;resize:vertical;background:var(--bg)}
-input{padding:9px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--bg)}
+textarea{width:100%;min-height:92px;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:16px;resize:vertical;background:var(--bg)}
+input{padding:11px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:16px;background:var(--bg)}
 select{padding:9px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--bg)}
-button{font:inherit;font-size:15px;padding:10px 18px;border-radius:8px;border:1px solid var(--line);background:var(--card);cursor:pointer}
+button{font:inherit;font-size:16px;padding:12px 18px;min-height:44px;border-radius:8px;border:1px solid var(--line);background:var(--card);cursor:pointer}
 button.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
 button.chip{font-size:13px;padding:6px 12px;border-radius:99px;color:var(--mut)}
 button.rec{background:#a32d2d;color:#fff;border-color:#a32d2d}
@@ -462,9 +493,15 @@ code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:13px}
 <div class="sub" id="subtitle">A salesperson's voice note becomes a structured, evidence-backed signal.</div>
 
 <div class="card" id="gate">
-  <label for="code">Access code</label>
-  <div class="row"><input id="code" type="password" autocomplete="off">
-  <button class="primary" onclick="unlock()">Enter</button></div>
+  <form onsubmit="unlock();return false">
+    <label for="code">Access code</label>
+    <div class="row">
+      <input id="code" type="text" inputmode="text" autocomplete="off"
+             autocapitalize="none" autocorrect="off" spellcheck="false"
+             enterkeyhint="go" style="font-size:16px">
+      <button class="primary" type="submit">Enter</button>
+    </div>
+  </form>
   <div class="err hide" id="gateErr">Wrong code.</div>
 </div>
 
@@ -528,9 +565,16 @@ function tab(n){
   if(n==='team')loadTeam();
 }
 function unlock(){
-  code=document.getElementById('code').value;
+  // Mobile keyboards autocapitalise and append spaces; an exact comparison
+  // against an untrimmed value fails for a code the person typed correctly.
+  code=document.getElementById('code').value.trim();
+  if(!code){document.getElementById('gateErr').textContent='Enter the code first.';
+    document.getElementById('gateErr').classList.remove('hide');return;}
   fetch('/api/aggregate',{headers:hdr()}).then(r=>{
-    if(!r.ok){document.getElementById('gateErr').classList.remove('hide');return;}
+    if(!r.ok){const g=document.getElementById('gateErr');
+      g.textContent=r.status===401?'Wrong code.':'Could not reach the server ('+r.status+').';
+      g.classList.remove('hide');return;}
+    document.getElementById('gateErr').classList.add('hide');
     document.getElementById('gate').classList.add('hide');
     document.getElementById('main').classList.remove('hide');
     document.getElementById('samples').innerHTML=SAMPLES.map((s,i)=>
@@ -753,8 +797,6 @@ async function removePerson(id){
     document.getElementById('main').classList.remove('hide');
     document.getElementById('subtitle').textContent='Send a quick note about the conversation you just had.';
     document.getElementById('samples').innerHTML='';
-  }else{
-    document.getElementById('code').addEventListener('keydown',e=>{if(e.key==='Enter')unlock()});
   }
 })();
 </script></div></body></html>"""
